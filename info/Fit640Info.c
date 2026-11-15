@@ -12,6 +12,9 @@
 #include <Events.h>
 #include <Windows.h>
 #include <OSUtils.h>
+#include <Files.h>
+#include <Processes.h>
+#include <string.h>
 #include "../src/Fit640.h"
 
 #define LM_MainDevice (*(GDHandle *)0x08A4)
@@ -59,6 +62,7 @@ static const char *StatusText(short s)
     case kF640NoVBL:      return "not installed: could not start the refresh task";
     case kF640Dormant:    return "dormant: the screen was reset";
     case kF640Installing: return "startup did not finish";
+    case kF640Off:        return "switched off (real screen in use)";
     }
     return "unknown";
 }
@@ -79,6 +83,101 @@ static int HookFile(const char *name)
         return 1;
     }
     return 0;
+}
+
+/* Test hook: the file "Fit640 Launch" holds the full path of a program
+   to start once the report is done (e.g. a game to try). */
+static void LaunchFromHook(void)
+{
+    FILE *f = fopen("Fit640 Launch", "r");
+    Str255 path;
+    size_t n;
+    FSSpec spec;
+    LaunchParamBlockRec lp;
+    OSErr err;
+
+    if (!f)
+        return;
+    n = fread(path + 1, 1, 254, f);
+    fclose(f);
+    while (n > 0 && (path[n] == '\n' || path[n] == '\r'))
+        n--;
+    path[0] = (unsigned char)n;
+
+    err = FSMakeFSSpec(0, 0, path, &spec);
+    if (err == noErr) {
+        memset(&lp, 0, sizeof lp);
+        lp.launchBlockID = 0x4C43;          /* extendedBlock */
+        lp.launchEPBLength = sizeof lp - 12;
+        lp.launchControlFlags = 0x4000 | 0x0800;  /* continue, no file flags */
+        lp.launchAppSpec = &spec;
+        err = LaunchApplication(&lp);
+    }
+    printf("Launch: result %d\n", err);
+}
+
+/* The PostEvent trap takes its arguments in registers (event kind in A0,
+   message in D0) and the open-source headers have no glue for it. */
+static void PostAnEvent(short what, long message)
+{
+    __asm__ volatile("move.w %0,%%a0\n\tmove.l %1,%%d0\n\t.short 0xA02F"
+                     : : "d"(what), "d"(message)
+                     : "a0", "a1", "d0", "d1", "d2");
+}
+
+static void PumpEvents(unsigned long ticks)
+{
+    EventRecord e;
+    unsigned long t = LM_Ticks;
+
+    while (LM_Ticks - t < ticks)
+        WaitNextEvent(everyEvent, &e, 2, 0);
+}
+
+/* Test hook: the file "Fit640 Click" holds a string of L and R. Each one
+   simulates a mouse click on the left or right button of the Control
+   Strip module, then reports the result. */
+static void ClickFromHook(volatile Fit640Globals *g)
+{
+    FILE *f = fopen("Fit640 Click", "r");
+    char script[32];
+    size_t n, i;
+
+    if (!f)
+        return;
+    n = fread(script, 1, sizeof script, f);
+    fclose(f);
+    if (g->version < 5)
+        return;
+
+    PumpEvents(120);                /* let the strip draw itself first */
+    out("\nControl Strip module: drawn %d times at %d,%d-%d,%d\n",
+        g->stripDraws, g->stripRect.left, g->stripRect.top,
+        g->stripRect.right, g->stripRect.bottom);
+    if (g->stripDraws == 0)
+        return;
+
+    for (i = 0; i < n; i++) {
+        Point p;
+
+        if (script[i] != 'L' && script[i] != 'R')
+            continue;
+        p.h = (script[i] == 'L') ? g->stripRect.left + 12
+                                 : g->stripRect.right - 12;
+        p.v = (g->stripRect.top + g->stripRect.bottom) / 2;
+        *(Point *)0x0828 = p;       /* MTemp */
+        *(Point *)0x082C = p;       /* RawMouse */
+        *(Point *)0x0830 = p;       /* Mouse */
+        *(char *)0x08CE = *(char *)0x08CF;  /* CrsrNew = CrsrCouple */
+        PostAnEvent(mouseDown, 0);
+        PostAnEvent(mouseUp, 0);
+        PumpEvents(150);
+        out("Click %c at %d,%d: %s, mode %s, device %d x %d, clicks seen %d\n",
+            script[i], p.h, p.v, StatusText(g->status),
+            g->mode == kModeScale ? "scale" : "crop",
+            (*LM_MainDevice)->gdRect.right, (*LM_MainDevice)->gdRect.bottom,
+            g->stripClicks);
+    }
 }
 
 /* Extra detail about the window system's drawing ports, for the log. */
@@ -148,8 +247,21 @@ int main(void)
         OSErr err = SetDepth(gd, want, 1, 1);
         out("Depth change to %d bits: result %d\n", want, err);
     }
-    if (g && HookFile("Fit640 Scale") && g->canScale)
+    /* "Fit640 Off" switches the 640x480 screen off before reporting;
+       "Fit640 OffOn" switches it off and on again. */
+    if (g && g->version >= 4 && g->switchProc) {
+        Fit640SwitchProc sw = (Fit640SwitchProc)g->switchProc;
+        if (HookFile("Fit640 Off"))
+            out("Switch off: result %d\n", sw(0));
+        if (HookFile("Fit640 OffOn")) {
+            out("Switch off: result %d\n", sw(0));
+            out("Switch on: result %d\n", sw(1));
+        }
+    }
+    if (g && HookFile("Fit640 Scale"))
         g->mode = kModeScale;
+    if (g && HookFile("Fit640 Crop"))
+        g->mode = kModeCrop;
     if (g && HookFile("Fit640 Slow")) {
         if (g->version >= 2)
             g->cropRowsPerTick = g->scaleRowsPerTick = 32;
@@ -171,6 +283,7 @@ int main(void)
         out("Fit640 is not loaded.\n\nPress Return to quit.\n");
         if (gLog)
             fclose(gLog);
+        LaunchFromHook();
         getchar();
         return 0;
     }
@@ -179,7 +292,8 @@ int main(void)
     out("Real screen %d x %d, %d-bit. CPU type %d, MOVE16 %s\n",
         g->realW, g->realH, g->depth, g->cpu, g->useMove16 ? "on" : "off");
     out("Mode: %s%s, view %d,%d", g->mode == kModeScale ? "scale" : "crop",
-        g->canScale ? "" : " (scale needs 256 colors)", g->viewX, g->viewY);
+        (g->mode == kModeScale && !g->canScale)
+            ? " (needs 256 colors; showing crop)" : "", g->viewX, g->viewY);
     if (g->version >= 2)
         out(g->followMouse ? ", follows mouse" : ", locked on centre");
     out("\n");
@@ -198,6 +312,10 @@ int main(void)
         PrintBench("compare only", g->benchCompare, g->benchTicks);
         out("Change-only redrawing: %s\n", g->useShadow ? "on" : "off");
         out("Depth changes survived: %d\n", g->depthChanges);
+        if (g->version >= 4)
+            detail("  switches %d (last result %d), desktop rebuilt by hand %d,\n"
+                   "  Display Manager %s\n", g->switchCount, g->lastSwitchErr,
+                   g->reflowsByHand, g->dmPresent ? "present" : "absent");
         detail("  budget per tick %ld (crop) %ld (scale); row costs %d to check,\n"
                "  %d more to redraw (crop), %d and %d (scale)\n",
                g->budget[0], g->budget[1], g->cmpCost[0], g->writeCost[0],
@@ -224,28 +342,43 @@ int main(void)
         out(".\n");
     }
 
+    ClickFromHook(g);
+
     if (gLog) {
         fclose(gLog);
         gLog = NULL;
     }
 
-    printf("\nS + Return: crop/scale.  C + Return: lock view on\n"
-           "centre / follow mouse.  Return alone: quit.\n");
+    LaunchFromHook();
+
+    printf("\nS + Return: scale/crop.  C + Return: lock view on\n"
+           "centre / follow mouse.  O + Return: 640x480 on/off.\n"
+           "Return alone: quit.\n");
     {
         int c;
 
         while ((c = getchar()) != EOF) {
             if (c == 's' || c == 'S') {
-                if (g->canScale)
-                    g->mode = (g->mode == kModeScale) ? kModeCrop : kModeScale;
+                short m = (g->mode == kModeScale) ? kModeCrop : kModeScale;
+                if (g->version >= 5 && g->setModeProc)
+                    ((Fit640SetModeProc)g->setModeProc)(m);
                 else
-                    printf("Scale needs 256 colors on a 512x384 screen.\n");
+                    g->mode = m;
+                printf("Mode: %s%s.\n", m == kModeScale ? "scale" : "crop",
+                       (m == kModeScale && !g->canScale)
+                           ? " (needs 256 colors; showing crop for now)" : "");
             } else if (c == 'c' || c == 'C') {
                 g->followMouse = !g->followMouse;
                 if (!g->followMouse) {
                     g->viewX = ((kVirtW - g->realW) / 2) & ~15;
                     g->viewY = (kVirtH - g->realH) / 2;
                 }
+            } else if ((c == 'o' || c == 'O') && g->version >= 4 &&
+                       g->switchProc) {
+                Fit640SwitchProc sw = (Fit640SwitchProc)g->switchProc;
+                short err = sw(g->status != kF640Active);
+                printf("640x480 is now %s (result %d).\n",
+                       g->status == kF640Active ? "on" : "off", err);
             } else if (c == '\n' || c == '\r') {
                 break;
             }

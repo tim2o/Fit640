@@ -17,8 +17,9 @@ dd if=/dev/zero of=Fit640.dsk bs=1024 count=1440 2>/dev/null
 "$TOOLCHAIN/bin/hformat" -l Fit640 Fit640.dsk > /dev/null
 "$TOOLCHAIN/bin/hcopy" -m Fit640.bin :
 "$TOOLCHAIN/bin/hcopy" -m Fit640Info.bin :
+"$TOOLCHAIN/bin/hcopy" -m Fit640Strip.bin :
 "$TOOLCHAIN/bin/hls" -l
 "$TOOLCHAIN/bin/humount"
-python3 "$HERE/tools/mksit.py" Fit640.sit Fit640.bin Fit640Info.bin
+python3 "$HERE/tools/mksit.py" Fit640.sit Fit640.bin Fit640Strip.bin Fit640Info.bin
 echo "Built: $HERE/build/Fit640.dsk"
 echo "Built: $HERE/build/Fit640.sit"

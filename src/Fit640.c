@@ -9,7 +9,8 @@
  * The real video mode is never changed.
  *
  * Hot keys (while running):
- *   Control-Option-S   switch between crop and scale
+ *   Control-Option-S   switch between scale and crop (until restart; the
+ *                      Control Strip module and Fit640Info save the choice)
  *   Control-Option-C   lock the crop window on the centre of the screen /
  *                      go back to following the mouse
  * Hold Control during startup to avoid the 68040 MOVE16 instruction.
@@ -45,6 +46,8 @@
 #define LM_MMU32Bit    (*(char *)0x0CB2)
 #define LM_WMgrCPort   (*(CGrafPtr *)0x0D2C)
 #define LM_PortList    (*(Handle *)0x0D66)
+#define LM_GrayRgn     (*(RgnHandle *)0x09EE)
+#define LM_MBarHeight  (*(short *)0x0BAA)
 
 /* Virtual key codes */
 #define kKeyS       0x01
@@ -55,6 +58,14 @@
 #define kBenchTicks 30
 #define kMaxDepth   16          /* the buffers are sized for this */
 #define kTrapInitGDevice 0xAA2E
+#define kTrapDisplayDispatch 0xABEB
+#define kTrapUnimplemented 0xA89F
+
+/* Display Manager (not in the open-source headers). */
+pascal OSErr DMBeginConfigureDisplays(Handle *displayState)
+    M68K_INLINE(0x303C, 0x0206, 0xABEB);
+pascal OSErr DMEndConfigureDisplays(Handle displayState)
+    M68K_INLINE(0x303C, 0x0207, 0xABEB);
 
 /* ------------------------------------------------------------------ */
 
@@ -325,11 +336,23 @@ static int PlausiblePtr(const void *p)
     return a >= 0x2000 && a < 0x40000000UL && (a & 1) == 0;
 }
 
-/* Point one existing drawing port at the virtual screen, if it currently
-   describes the real one. Only writes fields in place (no Memory Manager
-   calls), so it is safe from the refresh task. Returns 1 if changed. */
-static int RetargetPort(GrafPtr port, int wholeScreen)
+/*
+ * Make one existing screen port describe the virtual screen (toVirtual) or
+ * the real one. Ports that are not screen ports are left alone. Only writes
+ * fields in place (no Memory Manager calls), so it is safe from the refresh
+ * task. Returns 1 if anything changed.
+ */
+static int PointPort(GrafPtr port, int toVirtual, int wholeScreen)
 {
+    char *to = toVirtual ? g.virtBase : g.realBase;
+    char *other = toVirtual ? g.realBase : g.virtBase;
+    long row = toVirtual ? g.virtRow : g.realRow;
+    long otherRow = toVirtual ? g.realRow : g.virtRow;
+    short w = toVirtual ? kVirtW : g.realW;
+    short h = toVirtual ? kVirtH : g.realH;
+    int changed = 0;
+    Rect *bounds;
+
     if (!PlausiblePtr(port))
         return 0;
 
@@ -339,57 +362,68 @@ static int RetargetPort(GrafPtr port, int wholeScreen)
         if (!PlausiblePtr(pmh) || !PlausiblePtr(*pmh))
             return 0;
         pm = *pmh;
-        if (pm->baseAddr != g.realBase)
+        if (pm->baseAddr != to && pm->baseAddr != other)
             return 0;
-        pm->baseAddr = g.virtBase;
-        pm->rowBytes = (short)((pm->rowBytes & 0xC000) | g.virtRow);
-        pm->bounds.right = pm->bounds.left + kVirtW;
-        pm->bounds.bottom = pm->bounds.top + kVirtH;
+        if (pm->baseAddr != to) {
+            pm->baseAddr = to;
+            changed = 1;
+        }
+        pm->rowBytes = (short)((pm->rowBytes & 0xC000) | row);
+        bounds = &pm->bounds;
     } else {
         BitMap *bm = &port->portBits;
-        if (bm->baseAddr != g.realBase)
+        if (bm->baseAddr != to && bm->baseAddr != other)
             return 0;
-        bm->baseAddr = g.virtBase;
+        if (bm->baseAddr != to) {
+            bm->baseAddr = to;
+            changed = 1;
+        }
         /* An old-style port on a color screen is recognised by its base
-           address; its rowBytes is the 1-bit value and stays that way. */
-        if ((long)bm->rowBytes == g.realRow)
-            bm->rowBytes = (short)g.virtRow;
+           address. Its rowBytes is either the screen's or the 1-bit value;
+           keep whichever kind it was. */
+        if ((long)bm->rowBytes == otherRow || (long)bm->rowBytes == row)
+            bm->rowBytes = (short)row;
         else
-            bm->rowBytes = kVirtW / 8;
-        bm->bounds.right = bm->bounds.left + kVirtW;
-        bm->bounds.bottom = bm->bounds.top + kVirtH;
+            bm->rowBytes = w / 8;
+        bounds = &bm->bounds;
     }
 
-    if (wholeScreen) {
+    if (bounds->right != bounds->left + w || bounds->bottom != bounds->top + h) {
+        bounds->right = bounds->left + w;
+        bounds->bottom = bounds->top + h;
+        changed = 1;
+    }
+
+    if (wholeScreen &&
+        (port->portRect.right != w || port->portRect.bottom != h)) {
         port->portRect.top = 0;
         port->portRect.left = 0;
-        port->portRect.bottom = kVirtH;
-        port->portRect.right = kVirtW;
+        port->portRect.bottom = h;
+        port->portRect.right = w;
+        changed = 1;
     }
-    return 1;
+    return changed;
 }
 
 /* The Window Manager's own ports are created from the screen as it was
    before we loaded, so they have to be brought along. So do the ports of
-   windows that already exist: re-initialising the screen points them back
-   at the real video memory. */
-static int RetargetWindowManager(void)
+   windows that already exist. */
+static int PointWindowManager(int toVirtual)
 {
-    int fixed = RetargetPort(LM_WMgrPort, 1) +
-                RetargetPort((GrafPtr)LM_WMgrCPort, 1);
+    int fixed = PointPort(LM_WMgrPort, toVirtual, 1) +
+                PointPort((GrafPtr)LM_WMgrCPort, toVirtual, 1);
     WindowPeek w = LM_WindowList;
     short guard = 64;
 
     while (PlausiblePtr(w) && guard-- > 0) {
-        fixed += RetargetPort((GrafPtr)w, 0);
+        fixed += PointPort((GrafPtr)w, toVirtual, 0);
         w = w->nextWindow;
     }
     return fixed;
 }
 
-/* Every color port QuickDraw knows about. Re-initialising the screen
-   points all of them back at the real video memory. */
-static int RetargetPortList(void)
+/* Every color port QuickDraw knows about. */
+static int PointPortList(int toVirtual)
 {
     Handle h = LM_PortList;
     short count, i;
@@ -403,7 +437,7 @@ static int RetargetPortList(void)
         return 0;
     ports = (CGrafPtr *)(*h + 2);
     for (i = 0; i < count; i++)
-        fixed += RetargetPort((GrafPtr)ports[i], 0);
+        fixed += PointPort((GrafPtr)ports[i], toVirtual, 0);
     return fixed;
 }
 
@@ -422,34 +456,42 @@ static void ReadRealScreen(GDHandle gd)
     g.depth = pm->pixelSize;
     g.virtRow = ((long)kVirtW * g.depth) >> 3;
     g.canScale = (g.depth == 8 && g.realW == 512 && g.realH == 384);
-    if (!g.canScale)
-        g.mode = kModeCrop;
 }
 
 /* Make the main device, low memory and the cursor describe the virtual
-   screen. The real one must already be recorded in g. */
-static void PointAtVirtualScreen(GDHandle gd)
+   screen (or, with toVirtual 0, the real one again). The real one must
+   already be recorded in g. */
+static void PointScreen(GDHandle gd, int toVirtual)
 {
     PixMapPtr pm = *(*gd)->gdPMap;
+    char *base = toVirtual ? g.virtBase : g.realBase;
+    long row = toVirtual ? g.virtRow : g.realRow;
+    short w = toVirtual ? kVirtW : g.realW;
+    short h = toVirtual ? kVirtH : g.realH;
 
-    pm->baseAddr = g.virtBase;
-    pm->rowBytes = (short)((pm->rowBytes & 0xC000) | g.virtRow);
-    pm->bounds.right = kVirtW;
-    pm->bounds.bottom = kVirtH;
-    (*gd)->gdRect.right = kVirtW;
-    (*gd)->gdRect.bottom = kVirtH;
+    pm->baseAddr = base;
+    pm->rowBytes = (short)((pm->rowBytes & 0xC000) | row);
+    pm->bounds.right = w;
+    pm->bounds.bottom = h;
+    (*gd)->gdRect.right = w;
+    (*gd)->gdRect.bottom = h;
 
-    LM_ScrnBase = g.virtBase;
-    LM_ScreenRow = (short)g.virtRow;
+    LM_ScrnBase = base;
+    LM_ScreenRow = (short)row;
 
     if (LM_CrsrDevice == gd) {
-        LM_CrsrBase = g.virtBase;
-        LM_CrsrRow = (short)g.virtRow;
+        LM_CrsrBase = base;
+        LM_CrsrRow = (short)row;
         LM_CrsrPin.top = 0;
         LM_CrsrPin.left = 0;
-        LM_CrsrPin.bottom = kVirtH;
-        LM_CrsrPin.right = kVirtW;
+        LM_CrsrPin.bottom = h;
+        LM_CrsrPin.right = w;
     }
+}
+
+static void PointAtVirtualScreen(GDHandle gd)
+{
+    PointScreen(gd, 1);
 }
 
 static short Clamp300(long v)
@@ -519,7 +561,8 @@ static short RowsPerTick(short benchFrames)
 static pascal void MyInitGDevice(short refNum, long mode, GDHandle gdh)
 {
     int ours = (gdh == LM_MainDevice) &&
-               (g.status == kF640Active || g.status == kF640Dormant);
+               (g.status == kF640Active || g.status == kF640Dormant ||
+                g.status == kF640Off);
 
     if (!ours) {
         gOldInitGDevice(refNum, mode, gdh);
@@ -537,12 +580,18 @@ static pascal void MyInitGDevice(short refNum, long mode, GDHandle gdh)
 
         if (pm->baseAddr == g.virtBase) {
             /* Nothing was reset. */
+        } else if (!g.enabled) {
+            /* Switched off: leave the real screen in place and make sure
+               nothing still points at the virtual one. */
+            ReadRealScreen(gdh);
+            g.depthPortsFixed = PointWindowManager(0) + PointPortList(0);
+            g.status = kF640Off;
         } else if (pm->pixelSize > kMaxDepth || w != g.realW || h != g.realH) {
             g.status = kF640Dormant;    /* cannot follow this one */
         } else {
             ReadRealScreen(gdh);
             PointAtVirtualScreen(gdh);
-            g.depthPortsFixed = RetargetWindowManager() + RetargetPortList();
+            g.depthPortsFixed = PointWindowManager(1) + PointPortList(1);
             ComputeBudgets();
             g.cropRowsPerTick = RowsPerTick(
                 (short)((long)(g.useMove16 ? g.benchCropMove16
@@ -558,6 +607,173 @@ static pascal void MyInitGDevice(short refNum, long mode, GDHandle gdh)
 
     ShowCursor();
     gBusy--;
+}
+
+/* ------------------------------------------------------------------ */
+/* Switching on and off while running                                  */
+
+#define kPrefsName "\pFit640 Prefs"
+
+static OSErr PrefsFolder(short *vRef, long *dirID)
+{
+    return FindFolder((short)0x8000 /* kOnSystemDisk */, 'pref', true,
+                      vRef, dirID);
+}
+
+/* The prefs file is two 16-bit words: on/off, then the mode. Without a
+   file the 640x480 screen is on and scaled to fit. */
+static void ReadPrefs(void)
+{
+    short vRef, ref;
+    short words[2];
+    long dirID, count = 4;
+
+    g.enabled = 1;
+    g.mode = kModeScale;
+    if (PrefsFolder(&vRef, &dirID) != noErr)
+        return;
+    if (HOpenDF(vRef, dirID, (ConstStringPtr)kPrefsName, 1, &ref) != noErr)
+        return;
+    words[0] = 1;
+    words[1] = kModeScale;
+    FSRead(ref, &count, words);
+    FSClose(ref);
+    if (count >= 2)
+        g.enabled = (words[0] != 0);
+    if (count >= 4)
+        g.mode = (words[1] == kModeCrop) ? kModeCrop : kModeScale;
+}
+
+static void WritePrefs(void)
+{
+    short vRef, ref;
+    short words[2];
+    long dirID, count = 4;
+
+    if (PrefsFolder(&vRef, &dirID) != noErr)
+        return;
+    HCreate(vRef, dirID, (ConstStringPtr)kPrefsName, 'F640', 'pref');
+    if (HOpenDF(vRef, dirID, (ConstStringPtr)kPrefsName, 3, &ref) != noErr)
+        return;
+    words[0] = g.enabled;
+    words[1] = g.mode;
+    if (FSWrite(ref, &count, words) == noErr)
+        SetEOF(ref, 4);
+    FSClose(ref);
+}
+
+/* Without the Display Manager: rebuild the desktop for the new size by
+   hand and repaint everything. */
+static void ReflowByHand(void)
+{
+    GDHandle gd = LM_MainDevice;
+    Rect r = (*gd)->gdRect;
+    RgnHandle gray = LM_GrayRgn;
+    GrafPtr wp = LM_WMgrPort;
+    CGrafPtr wc = LM_WMgrCPort;
+
+    if (!PlausiblePtr(gray) || !PlausiblePtr(*gray))
+        return;
+    if (PlausiblePtr(wp)) {
+        wp->portRect = r;
+        RectRgn(wp->visRgn, &r);
+    }
+    if (PlausiblePtr(wc)) {
+        wc->portRect = r;
+        RectRgn(wc->visRgn, &r);
+    }
+    SetRectRgn(gray, r.left, r.top + LM_MBarHeight, r.right, r.bottom);
+    DrawMenuBar();
+    if (PlausiblePtr(LM_WindowList)) {
+        CalcVisBehind(LM_WindowList, gray);
+        PaintBehind(LM_WindowList, gray);
+    } else {
+        PaintOne(0, gray);
+    }
+}
+
+/*
+ * Apply g.enabled now: point the system at the virtual screen or back at
+ * the real one. Doing it between the Display Manager's begin/end calls
+ * lets the system notice the size change, rebuild the desktop, move
+ * windows back on screen and tell applications. If it does not, the
+ * desktop is rebuilt by hand.
+ */
+static OSErr Reconfigure(void)
+{
+    GDHandle gd = LM_MainDevice;
+    Handle state = 0;
+    OSErr err = noErr;
+    int dm = g.dmPresent;
+    Rect want, got;
+
+    if (dm && DMBeginConfigureDisplays(&state) != noErr)
+        dm = 0;
+
+    gBusy++;
+    HideCursor();
+    if (g.enabled) {
+        PointScreen(gd, 1);
+        PointWindowManager(1);
+        PointPortList(1);
+        ComputeBudgets();
+        g.viewX = 0;
+        g.viewY = 0;
+        gNextRow = 0;
+        gFrameTicks = 0;
+        gForce = 1;
+        g.status = kF640Active;
+    } else {
+        g.status = kF640Off;
+        PointScreen(gd, 0);
+        PointWindowManager(0);
+        PointPortList(0);
+    }
+    ShowCursor();
+    gBusy--;
+
+    if (dm)
+        err = DMEndConfigureDisplays(state);
+
+    want = (*gd)->gdRect;
+    if (PlausiblePtr(LM_GrayRgn) && PlausiblePtr(*LM_GrayRgn)) {
+        got = (*LM_GrayRgn)->rgnBBox;
+        if (got.right != want.right || got.bottom != want.bottom) {
+            ReflowByHand();
+            g.reflowsByHand++;
+        }
+    }
+    return err;
+}
+
+static pascal short Fit640Switch(short on)
+{
+    OSErr err;
+
+    on = on ? 1 : 0;
+    if (g.status != kF640Active && g.status != kF640Off &&
+        g.status != kF640Dormant)
+        return -50;                 /* paramErr: not installed */
+
+    if (g.status != kF640Dormant && (g.status == kF640Active) == on) {
+        g.enabled = on;
+        WritePrefs();
+        return noErr;               /* already there */
+    }
+
+    g.enabled = on;
+    WritePrefs();
+    g.switchCount++;
+    err = Reconfigure();
+    g.lastSwitchErr = err;
+    return err;
+}
+
+static pascal short Fit640SetMode(short mode)
+{
+    g.mode = (mode == kModeCrop) ? kModeCrop : kModeScale;
+    WritePrefs();
+    return noErr;
 }
 
 /* ------------------------------------------------------------------ */
@@ -589,7 +805,7 @@ static void VBLProc(void)
     }
 
     /* Catch Window Manager ports created after we loaded. */
-    n = RetargetWindowManager();
+    n = PointWindowManager(1);
     g.portsFixed += n;
     g.portsFixedLate += n;
 
@@ -785,13 +1001,26 @@ static short Install(void)
         return kF640NoVBL;
     }
 
-    PointAtVirtualScreen(gd);
-    g.portsFixed = RetargetWindowManager();
-    g.wmExisted = (g.portsFixed != 0);
-
     gOldInitGDevice = (InitGDeviceProc)GetToolTrapAddress(kTrapInitGDevice);
     SetToolTrapAddress((ProcPtr)MyInitGDevice, kTrapInitGDevice);
     g.trapPatched = 1;
+    g.switchProc = (void *)Fit640Switch;
+    g.setModeProc = (void *)Fit640SetMode;
+    g.dmPresent =
+        GetToolTrapAddress(kTrapDisplayDispatch) !=
+            GetToolTrapAddress(kTrapUnimplemented) &&
+        Gestalt('dply', &response) == noErr && (response & 1);
+
+    /* Start the way it was left: on or off, scaled or cropped. */
+    ReadPrefs();
+    if (!g.enabled) {
+        ShowCursor();
+        return kF640Off;
+    }
+
+    PointAtVirtualScreen(gd);
+    g.portsFixed = PointWindowManager(1);
+    g.wmExisted = (g.portsFixed != 0);
 
     ShowCursor();
 

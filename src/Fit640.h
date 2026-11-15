@@ -8,7 +8,7 @@
 #define FIT640_H
 
 #define kFit640Selector 0x46363430L /* 'F640' */
-#define kFit640Version  3
+#define kFit640Version  5
 
 #define kVirtW 640
 #define kVirtH 480
@@ -23,7 +23,8 @@ enum {
     kF640NoMemory = 5,     /* could not allocate the virtual screen */
     kF640NoVBL = 6,        /* could not install the screen refresh task */
     kF640Dormant = 7,      /* something reset the screen (e.g. depth change) */
-    kF640Installing = 8    /* startup did not finish */
+    kF640Installing = 8,   /* startup did not finish */
+    kF640Off = 9           /* switched off: the real screen is in use */
 };
 
 enum {
@@ -85,6 +86,31 @@ typedef struct Fit640Globals {
     short cmpCost[2];
     short writeCost[2];
     unsigned long rowsWritten; /* screen rows actually redrawn so far */
+
+    /* Added in version 4 */
+    short enabled;             /* 1 = the 640x480 screen is wanted */
+    short dmPresent;           /* the Display Manager is available */
+    short lastSwitchErr;       /* result of the last on/off switch */
+    short switchCount;         /* on/off switches since startup */
+    short reflowsByHand;       /* ...where we had to rebuild the desktop */
+    short reserved4;
+    void *switchProc;          /* a Fit640SwitchProc: turns the 640x480
+                                  screen on (1) or off (0) right now and
+                                  remembers the choice for the next startup.
+                                  Call it only from normal application time,
+                                  never from an interrupt. */
+    /* Added in version 5 */
+    void *setModeProc;         /* a Fit640SetModeProc: choose kModeCrop or
+                                  kModeScale and remember it. Application
+                                  time only. */
+    Rect  stripRect;           /* where the Control Strip module last drew
+                                  itself, in global coordinates */
+    short stripDraws;          /* how many times it has drawn */
+    short stripClicks;         /* clicks it has handled */
 } Fit640Globals;
+
+/* How to call Fit640Globals.switchProc and setModeProc. */
+typedef pascal short (*Fit640SwitchProc)(short on);
+typedef pascal short (*Fit640SetModeProc)(short mode);
 
 #endif

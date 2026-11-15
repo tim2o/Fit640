@@ -5,9 +5,11 @@
 #
 #   tools/emutest.sh [init|noinit] [seconds] [depth] [variant]
 #
-# variant is any combination of the words scale, slow and depth, e.g.
+# variant is any combination of the words crop, scale, slow, depth, off and
+# offon, e.g.
 # "scaleslow": they drop test-hook files next to the Info app.
-# Environment: BASE (system image), CPU (4 = 68040, 3 = 68030), ROM and
+# Environment: CLICK (L/R clicks on the Control Strip module), LAUNCH (full Mac path of a program to start after the
+# report), BASE (system image), SYSFOLDER (its system folder), CPU (4 = 68040, 3 = 68030), ROM and
 # MODELID (a 68030 needs a 68030-era ROM, e.g. ROM=maciici.rom MODELID=5).
 #
 # Expects in $EMU (default ~/Retro68/emu/test): quadra650.rom, winid and the
@@ -16,9 +18,10 @@ set -e
 MODE="${1:-init}"
 SECS="${2:-50}"
 DEPTH="${3:-8}"
-VARIANT="${4:-crop}"
+VARIANT="${4:-plain}"
 EMU="${EMU:-$HOME/Retro68/emu/test}"
 BASE="${BASE:-base753.dsk}"
+SYSFOLDER="${SYSFOLDER:-System Folder}"   # the startup system on that image
 CPU="${CPU:-4}"            # 4 = 68040, 3 = 68030
 ROM="${ROM:-quadra650.rom}"
 MODELID="${MODELID:-14}"   # 14 = Quadra 900, 5 = Mac IIci
@@ -37,20 +40,39 @@ stop_emulator
 rm -f "$EMU/run.dsk"
 cp -c "$EMU/$BASE" "$EMU/run.dsk" 2>/dev/null || cp "$EMU/$BASE" "$EMU/run.dsk"
 "$BIN/hmount" "$EMU/run.dsk" > /dev/null
-"$BIN/hdel" ":System Folder:Startup Items:Energy Saver" 2>/dev/null || true
+"$BIN/hdel" ":$SYSFOLDER:Startup Items:Energy Saver" 2>/dev/null || true
 if [ "$MODE" = "init" ]; then
-    "$BIN/hcopy" -m "$BUILD/Fit640.bin" ":System Folder:Extensions:"
+    "$BIN/hcopy" -m "$BUILD/Fit640.bin" ":$SYSFOLDER:Extensions:"
+    "$BIN/hcopy" -m "$BUILD/Fit640Strip.bin" ":$SYSFOLDER:Control Strip Modules:" 2>/dev/null || true
 fi
-"$BIN/hcopy" -m "$BUILD/Fit640Info.bin" ":System Folder:Startup Items:"
+"$BIN/hcopy" -m "$BUILD/Fit640Info.bin" ":$SYSFOLDER:Startup Items:"
 : > "$EMU/empty.txt"
+case "$VARIANT" in *crop*)
+    "$BIN/hcopy" -r "$EMU/empty.txt" ":$SYSFOLDER:Startup Items:Fit640 Crop" ;;
+esac
 case "$VARIANT" in *scale*)
-    "$BIN/hcopy" -r "$EMU/empty.txt" ":System Folder:Startup Items:Fit640 Scale" ;;
+    "$BIN/hcopy" -r "$EMU/empty.txt" ":$SYSFOLDER:Startup Items:Fit640 Scale" ;;
 esac
 case "$VARIANT" in *depth*)
-    "$BIN/hcopy" -r "$EMU/empty.txt" ":System Folder:Startup Items:Fit640 Depth" ;;
+    "$BIN/hcopy" -r "$EMU/empty.txt" ":$SYSFOLDER:Startup Items:Fit640 Depth" ;;
 esac
+case "$VARIANT" in
+    *offon*) "$BIN/hcopy" -r "$EMU/empty.txt" ":$SYSFOLDER:Startup Items:Fit640 OffOn" ;;
+    *off*)   "$BIN/hcopy" -r "$EMU/empty.txt" ":$SYSFOLDER:Startup Items:Fit640 Off" ;;
+esac
+if [ -n "$CLICK" ]; then
+    # CLICK is a string of L and R: clicks on the left / right button of
+    # the Control Strip module, one after another.
+    printf "%s" "$CLICK" > "$EMU/click.txt"
+    "$BIN/hcopy" -r "$EMU/click.txt" ":$SYSFOLDER:Startup Items:Fit640 Click"
+fi
+if [ -n "$LAUNCH" ]; then
+    # LAUNCH is a full Mac path with MacRoman bytes as \\xNN escapes.
+    printf "$LAUNCH" > "$EMU/launch.txt"
+    "$BIN/hcopy" -r "$EMU/launch.txt" ":$SYSFOLDER:Startup Items:Fit640 Launch"
+fi
 case "$VARIANT" in *slow*)
-    "$BIN/hcopy" -r "$EMU/empty.txt" ":System Folder:Startup Items:Fit640 Slow" ;;
+    "$BIN/hcopy" -r "$EMU/empty.txt" ":$SYSFOLDER:Startup Items:Fit640 Slow" ;;
 esac
 "$BIN/humount"
 
@@ -83,5 +105,5 @@ stop_emulator
 sleep 1
 "$BIN/hmount" "$EMU/run.dsk" > /dev/null
 echo "---- Fit640 Log ----"
-"$BIN/hcopy" -t ":System Folder:Startup Items:Fit640 Log" - 2>/dev/null || echo "(no log file)"
+"$BIN/hcopy" -t ":$SYSFOLDER:Startup Items:Fit640 Log" - 2>/dev/null || echo "(no log file)"
 "$BIN/humount"
