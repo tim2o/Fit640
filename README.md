@@ -1,8 +1,9 @@
 # Fit640 (proof of concept)
 
 A system extension for Color Classic-family Macs with the built-in 512×384
-screen (Color Classic II, or a Color Classic with an LC/Performa 550 or
-"Mystic" LC 575 board, with or without a 68040 upgrade) that makes the Mac
+screen (Color Classic, Color Classic II, or a Color Classic with an
+LC/Performa 550 or "Mystic" LC 575 board, with or without a 68040 upgrade)
+that makes the Mac
 believe its main screen is 640×480 while the CRT stays in its stock mode, so
 software that insists on 640×480 will run without the hardware 640×480
 modification. See [DESIGN.md](DESIGN.md) for the background.
@@ -15,12 +16,20 @@ Escape Velocity 1.0.5 on System 7.6.1 in an emulated 512×384 Mac. Without
 Fit640 it stops at "an error occurred while trying to open the Monitor Tool.
 ID = -3".
 
+Boards that also offer **560×384** in the Monitors control panel (the
+LC/Performa 550 board does) can use it for a sharper picture: Fit640 then
+shrinks 640 pixels to 560 instead of 512. On the real CRT 560×384 fills the
+same screen area, so the proportions stay right; the emulator window below
+shows it wider only because its pixels are square.
+
+![Escape Velocity scaled onto 560×384](docs/ev-scale-560.png)
+
 ## Status
 
 Early and experimental. One build covers System 7.5 through Mac OS 8.1, on
 68030 and 68040.
 
-- **Emulator (Basilisk II, 512×384):** boots and displays correctly on
+- **Emulator (Basilisk II, 512×384 and 560×384):** boots and displays correctly on
   System 7.5.3, 7.6.1 and Mac OS 8.1 with a 68040, and on System 7.5.3 with a
   68030 (Mac IIci ROM). Depth changes and switching the 640×480 screen off
   and on while running work on all three systems. Escape Velocity 1.0.5
@@ -42,11 +51,15 @@ Early and experimental. One build covers System 7.5 through Mac OS 8.1, on
   QuickDraw or the main graphics device see 640×480.
 - A screen-refresh task copies that buffer to the real screen in one of two
   ways:
-  - **Scale** (default): the whole 640×480 picture shrunk to 512×384, so
-    everything is reachable. Small text suffers. Needs 256 colors; at other
-    depths it shows crop.
-  - **Crop**: a 1:1 512×384 window that follows the mouse when the pointer
-    reaches an edge.
+  - **Scale** (default): the whole 640×480 picture shrunk to the real
+    screen, so everything is reachable. Small text suffers. Needs 256
+    colors; at other depths it shows crop.
+  - **Crop**: a 1:1 window the size of the real screen that follows the
+    mouse when the pointer reaches an edge.
+- **It adapts to the real screen size.** 512×384 is the normal case and all
+  that a stock Color Classic board offers. If the real screen is 560×384,
+  at startup or after a change in the Monitors control panel, scale and crop
+  both use the extra width.
 - **Only what changed is redrawn.** The task compares the buffer with a copy
   of what is already on screen and writes just the differing part of each
   row to video memory. The rows around the mouse pointer are checked every
@@ -68,7 +81,7 @@ Early and experimental. One build covers System 7.5 through Mac OS 8.1, on
 
 | Button shows | Meaning | Click to |
 |---|---|---|
-| `640` / `512` | the 640×480 screen is on / off | switch it |
+| `640` / `512` | the 640×480 screen is on / off (it shows `512` when off, whatever the real size) | switch it |
 | `Fit` / `1:1` | scale to fit / crop at full size | switch it |
 
 **Hot keys**

@@ -1,9 +1,9 @@
 /*
  * Fit640 - proof of concept.
  *
- * A system extension (INIT) that gives a Mac with a 512x384 built-in screen
- * a virtual 640x480 main screen. All drawing goes to a buffer in the system
- * heap; a VBL task copies part of it (crop) or a 5:4 reduction of it (scale)
+ * A system extension (INIT) that gives a Mac with a 512x384 (or 560x384)
+ * built-in screen a virtual 640x480 main screen. All drawing goes to a buffer in the system
+ * heap; a VBL task copies part of it (crop) or a reduction of it (scale)
  * to the real video memory.
  *
  * The real video mode is never changed.
@@ -72,6 +72,7 @@ pascal OSErr DMEndConfigureDisplays(Handle displayState)
 void CopyRowsMove16(const void *src, void *dst, long blocksPerRow, long rows,
                     long srcSkip, long dstSkip);
 void ScaleRow5to4(const void *src, void *dst, long groups);
+void ScaleRow8to7(const void *src, void *dst, long groups);
 long FirstDiffLong(const void *a, const void *b, long longs);
 long EqualTailLongs(const void *aEnd, const void *bEnd);
 
@@ -130,6 +131,27 @@ static short Div5(short x)
     return (short)(((long)x * 205) >> 10);
 }
 
+/*
+ * Shrink part of one 640-pixel row onto the real screen row: the source
+ * bytes o..o+len-1 and whatever else shares their groups. A 512-pixel
+ * screen takes 4 of every 5 pixels, a 560-pixel one 7 of every 8.
+ */
+static void ScaleRowSpan(const unsigned char *src, unsigned char *dst,
+                         long o, long len)
+{
+    short g0, g1;
+
+    if (g.realW == 560) {
+        g0 = (short)(o >> 3);
+        g1 = (short)((o + len - 1) >> 3);
+        ScaleRow8to7(src + 8 * g0, dst + 7 * g0, g1 - g0 + 1);
+    } else {
+        g0 = Div5((short)o);
+        g1 = Div5((short)(o + len - 1));
+        ScaleRow5to4(src + 5 * g0, dst + 4 * g0, g1 - g0 + 1);
+    }
+}
+
 /* Redraw real screen rows y0..y1-1 from the crop window, unconditionally. */
 static void PresentCropRows(short y0, short y1, int allowMove16)
 {
@@ -149,7 +171,7 @@ static void PresentCropRows(short y0, short y1, int allowMove16)
                      g.virtRow - visBytes, g.realRow - visBytes);
 }
 
-/* 640x480 -> 512x384, 8-bit. Keeps rows/columns 0,1,3,4 of every 5. */
+/* 640x480 -> 512x384 or 560x384, 8-bit. Keeps rows 0,1,3,4 of every 5. */
 static void PresentScaleRows(short y0, short y1)
 {
     const unsigned char *src = (const unsigned char *)g.virtBase
@@ -158,7 +180,7 @@ static void PresentScaleRows(short y0, short y1)
     short y;
 
     for (y = y0; y < y1; y++) {
-        ScaleRow5to4(src, dst, g.realW >> 2);
+        ScaleRowSpan(src, dst, 0, g.virtRow);
         dst += g.realRow;
         src += g.virtRow;
         if ((y & 3) == 1)
@@ -231,9 +253,7 @@ static long UpdateRows(short y0, short y1, int force)
         if (changed) {
             CopyRowsLong(src + o, sh + o, len, 1, 0, 0);
             if (scale) {
-                short g0 = Div5((short)o);
-                short g1 = Div5((short)(o + len - 1));
-                ScaleRow5to4(src + 5 * g0, dst + 4 * g0, g1 - g0 + 1);
+                ScaleRowSpan(src, dst, o, len);
             } else if (move16 && len == rowBytes) {
                 CopyRowsMove16(src, dst, rowBytes >> 4, 1, 0, 0);
             } else {
@@ -455,7 +475,10 @@ static void ReadRealScreen(GDHandle gd)
     g.realBase = pm->baseAddr;
     g.depth = pm->pixelSize;
     g.virtRow = ((long)kVirtW * g.depth) >> 3;
-    g.canScale = (g.depth == 8 && g.realW == 512 && g.realH == 384);
+    g.canScale = (g.depth == 8 && g.realH == 384 &&
+                  (g.realW == 512 || g.realW == 560));
+    /* Comparing works on whole 32-bit words of the visible row. */
+    g.useShadow = (gShadow != 0 && (VisBytes() & 3) == 0);
 }
 
 /* Make the main device, low memory and the cursor describe the virtual
@@ -516,8 +539,14 @@ static void ComputeBudgets(void)
     short m;
 
     for (m = 0; m < 2; m++) {
-        fw = m ? g.benchScale
-               : (g.useMove16 ? g.benchCropMove16 : g.benchCropLong);
+        if (!m)
+            fw = g.useMove16 ? g.benchCropMove16 : g.benchCropLong;
+        else if (g.benchScale > 0)
+            fw = g.benchScale;
+        else
+            /* Scaling was not possible at the startup depth, so it was
+               not timed: assume two thirds of the plain copy's speed. */
+            fw = (long)g.benchCropLong * 2 / 3;
         fc = g.benchCompare;
         /* The tests ran at benchDepth; more bits per pixel is more work. */
         if (g.benchDepth > 0 && g.depth > 0) {
@@ -586,8 +615,9 @@ static pascal void MyInitGDevice(short refNum, long mode, GDHandle gdh)
             ReadRealScreen(gdh);
             g.depthPortsFixed = PointWindowManager(0) + PointPortList(0);
             g.status = kF640Off;
-        } else if (pm->pixelSize > kMaxDepth || w != g.realW || h != g.realH) {
-            g.status = kF640Dormant;    /* cannot follow this one */
+        } else if (pm->pixelSize > kMaxDepth || w > kVirtW || h > kVirtH ||
+                   (w == kVirtW && h == kVirtH)) {
+            g.status = kF640Dormant;    /* nothing to do on this screen */
         } else {
             ReadRealScreen(gdh);
             PointAtVirtualScreen(gdh);
@@ -943,8 +973,8 @@ static short Install(void)
     if (g.virtBase == 0)
         return kF640NoMemory;
     gShadow = NewAlignedSysPtr(bufSize, &rawShadow);
+    ReadRealScreen(gd);             /* now that the shadow copy exists */
     visBytes = VisBytes();
-    g.useShadow = (gShadow != 0 && (visBytes & 3) == 0);
 
     g.followMouse = 1;
     g.viewX = 0;

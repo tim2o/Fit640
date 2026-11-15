@@ -101,3 +101,25 @@ EqualTailLongs:
     cmp.l   -(%a1),%d1
     beq.s   .Ltail
     rts
+
+|-----------------------------------------------------------------------
+| void ScaleRow8to7(const void *src, void *dst, long groups);
+|
+| 8-bit pixels. For each group of 8 source pixels writes 7, dropping
+| pixel 3. The second 4 bytes are written 3 bytes after the first, so
+| they overwrite the dropped pixel. Needs a 68020 or later (long writes
+| at odd addresses).
+|-----------------------------------------------------------------------
+    .balign 2
+    .globl  ScaleRow8to7
+ScaleRow8to7:
+    move.l  4(%sp),%a0
+    move.l  8(%sp),%a1
+    move.l  12(%sp),%d0
+    subq.l  #1,%d0
+.Lgroup8:
+    move.l  (%a0)+,(%a1)            | p0 p1 p2 p3
+    addq.l  #3,%a1
+    move.l  (%a0)+,(%a1)+           | p4 p5 p6 p7 over p3
+    dbra    %d0,.Lgroup8
+    rts

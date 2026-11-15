@@ -8,7 +8,7 @@
 # variant is any combination of the words crop, scale, slow, depth, off and
 # offon, e.g.
 # "scaleslow": they drop test-hook files next to the Info app.
-# Environment: CLICK (L/R clicks on the Control Strip module), LAUNCH (full Mac path of a program to start after the
+# Environment: SCREEN (real screen size, default 512/384), CLICK (L/R clicks on the Control Strip module), LAUNCH (full Mac path of a program to start after the
 # report), BASE (system image), SYSFOLDER (its system folder), CPU (4 = 68040, 3 = 68030), ROM and
 # MODELID (a 68030 needs a 68030-era ROM, e.g. ROM=maciici.rom MODELID=5).
 #
@@ -23,6 +23,7 @@ EMU="${EMU:-$HOME/Retro68/emu/test}"
 BASE="${BASE:-base753.dsk}"
 SYSFOLDER="${SYSFOLDER:-System Folder}"   # the startup system on that image
 CPU="${CPU:-4}"            # 4 = 68040, 3 = 68030
+SCREEN="${SCREEN:-512/384}" # the emulated real screen, e.g. 560/384
 ROM="${ROM:-quadra650.rom}"
 MODELID="${MODELID:-14}"   # 14 = Quadra 900, 5 = Mac IIci
 BIN="${RETRO68:-$HOME/Retro68/build/toolchain}/bin"
@@ -79,7 +80,7 @@ esac
 cat > "$EMU/prefs" <<PREFS
 rom $EMU/$ROM
 disk $EMU/run.dsk
-screen win/512/384
+screen win/$SCREEN
 displaycolordepth $DEPTH
 ramsize 33554432
 cpu $CPU
@@ -94,7 +95,7 @@ PREFS
 "$BASILISK" --config "$EMU/prefs" > "$EMU/basilisk.log" 2>&1 &
 sleep "$SECS"
 WID="$("$EMU/winid" 2>/dev/null || true)"
-SHOT="$EMU/shot-${BASE%.dsk}-cpu$CPU-$MODE-$DEPTH-$VARIANT.png"
+SHOT="$EMU/shot-${BASE%.dsk}-cpu$CPU-$(echo "$SCREEN" | tr / x)-$MODE-$DEPTH-$VARIANT.png"
 if [ -n "$WID" ] && screencapture -x -o -l "$WID" "$SHOT" 2>/dev/null; then
     echo "Picture: $SHOT"
 else
