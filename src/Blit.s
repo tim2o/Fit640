@@ -57,3 +57,47 @@ ScaleRow5to4:
     move.l  %d1,(%a1)+
     dbra    %d0,.Lgroup
     rts
+
+|-----------------------------------------------------------------------
+| long FirstDiffLong(const void *a, const void *b, long longs);
+|
+| Compares two runs of 32-bit words. Returns the index of the first one
+| that differs, or `longs` if they are all equal. longs: 1..32768.
+|-----------------------------------------------------------------------
+    .balign 2
+    .globl  FirstDiffLong
+FirstDiffLong:
+    move.l  4(%sp),%a0
+    move.l  8(%sp),%a1
+    move.l  12(%sp),%d0
+    move.l  %d0,%d1
+    subq.l  #1,%d1
+.Lcmp:
+    cmpm.l  (%a0)+,(%a1)+
+    dbne    %d1,.Lcmp
+    beq.s   .Lsame                  | ran out with the last pair equal
+    subq.l  #1,%d0
+    ext.l   %d1
+    sub.l   %d1,%d0                 | longs - 1 - remaining
+.Lsame:
+    rts
+
+|-----------------------------------------------------------------------
+| long EqualTailLongs(const void *aEnd, const void *bEnd);
+|
+| Walks backwards from the two end pointers and returns how many 32-bit
+| words are equal before the first difference. The caller guarantees
+| there is a difference.
+|-----------------------------------------------------------------------
+    .balign 2
+    .globl  EqualTailLongs
+EqualTailLongs:
+    move.l  4(%sp),%a0
+    move.l  8(%sp),%a1
+    moveq   #-1,%d0
+.Ltail:
+    addq.l  #1,%d0
+    move.l  -(%a0),%d1
+    cmp.l   -(%a1),%d1
+    beq.s   .Ltail
+    rts

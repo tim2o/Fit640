@@ -8,7 +8,7 @@
 #define FIT640_H
 
 #define kFit640Selector 0x46363430L /* 'F640' */
-#define kFit640Version  2
+#define kFit640Version  3
 
 #define kVirtW 640
 #define kVirtH 480
@@ -70,6 +70,21 @@ typedef struct Fit640Globals {
     short portsFixedLate;      /* ...of which after startup, by the refresh task */
     short cropRowsPerTick;     /* screen rows redrawn per 1/60 s, from the */
     short scaleRowsPerTick;    /* startup speed test (whole screen = realH) */
+
+    /* Added in version 3 */
+    short useShadow;           /* redraws only what changed, by comparing
+                                  against a copy of what is on screen */
+    short benchCompare;        /* startup test: whole-screen compares */
+    short benchDepth;          /* depth the startup tests ran at */
+    short depthChanges;        /* depth changes survived since startup */
+    short trapPatched;         /* InitGDevice is patched */
+    short depthPortsFixed;     /* ports redirected inside the depth-change patch */
+    /* Redraw budget per tick, [0] = crop, [1] = scale. Checking a row
+       costs cmpCost, redrawing it costs writeCost more. */
+    long  budget[2];
+    short cmpCost[2];
+    short writeCost[2];
+    unsigned long rowsWritten; /* screen rows actually redrawn so far */
 } Fit640Globals;
 
 #endif
